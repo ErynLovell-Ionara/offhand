@@ -343,8 +343,111 @@ function Capture({ template, onCancel, onExtracted }) {
 }
 
 // ---------------- Review ----------------
+// Guided voice gap-fill: reads each missing field's question aloud, records the
+// answer, transcribes it via the same Deepgram pipeline, fills it, moves on.
+function GapFiller({ gaps, questionFor, onFill, onDone }) {
+  const [i, setI] = useState(0);
+  const [phase, setPhase] = useState("idle"); // idle | asking | listening | working
+  const [heard, setHeard] = useState("");
+  const [err, setErr] = useState(null);
+  const recRef = useRef(null);
+  const chunksRef = useRef([]);
+  const canTTS = typeof window !== "undefined" && "speechSynthesis" in window;
+
+  const field = gaps[i];
+  const q = field ? (questionFor(field.key) || `What's the ${field.label.toLowerCase()}?`) : null;
+
+  const speak = (text) => new Promise((res) => {
+    if (!canTTS) return res();
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-NZ"; u.rate = 1; u.onend = res; u.onerror = res;
+      window.speechSynthesis.speak(u);
+      setTimeout(res, 6000); // safety net
+    } catch { res(); }
+  });
+
+  const askAndListen = async () => {
+    setErr(null); setHeard(""); setPhase("asking");
+    await speak(q);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setPhase("working");
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
+        if (blob.size < 800) { setErr("Didn't catch that — tap to try again."); setPhase("idle"); return; }
+        try {
+          const audio = await blobToBase64(blob);
+          const r = await fetch("/api/transcribe", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ audio, mimeType: blob.type }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || "transcription error");
+          const answer = (data.transcript || "").trim();
+          if (!answer) { setErr("Didn't catch that — tap to try again."); setPhase("idle"); return; }
+          setHeard(answer);
+          onFill(field, answer);
+          setPhase("confirm");
+        } catch (e) { setErr(e.message); setPhase("idle"); }
+      };
+      recRef.current = rec;
+      rec.start();
+      setPhase("listening");
+    } catch (e) {
+      setErr(MIC_ERRORS[e.name] || "Couldn't reach the microphone. Fill this one by typing below.");
+      setPhase("idle");
+    }
+  };
+
+  const stopListening = () => { if (recRef.current?.state === "recording") recRef.current.stop(); };
+  const next = () => { setHeard(""); setPhase("idle"); if (i + 1 < gaps.length) setI(i + 1); else onDone(); };
+
+  useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
+
+  if (!field) return null;
+
+  return (
+    <div className="gapfill">
+      <div className="gapfill-progress mono">Gap {i + 1} of {gaps.length}</div>
+      <div className="gapfill-q">{q}</div>
+
+      {phase === "idle" && (
+        <button className="gapfill-mic" onClick={askAndListen}>
+          {canTTS ? "Ask me & answer" : "Tap and answer"}
+        </button>
+      )}
+      {phase === "asking" && <div className="gapfill-state">Reading the question…</div>}
+      {phase === "listening" && (
+        <button className="gapfill-mic gapfill-live" onClick={stopListening}>Listening — tap when done</button>
+      )}
+      {phase === "working" && <div className="gapfill-state">Writing it down…</div>}
+      {phase === "confirm" && (
+        <div className="gapfill-confirm">
+          <div className="gapfill-heard">“{heard}”</div>
+          <div className="gapfill-actions">
+            <button className="mini" onClick={next}>{i + 1 < gaps.length ? "Next gap" : "Done"}</button>
+            <button className="mini ghost" onClick={() => { onFill(field, null); askAndListen(); }}>Redo</button>
+          </div>
+        </div>
+      )}
+
+      {err && <div className="warn" style={{ marginTop: 10 }}>{err}</div>}
+      <button className="gapfill-skip" onClick={next}>Skip — I'll type this one</button>
+    </div>
+  );
+}
+
 function Review({ record, settings, update, switchTemplate, onFinalise, onBack }) {
   const template = getTemplate(record.templateId);
+  const [guiding, setGuiding] = useState(false);
   const setField = (key, value) => update({ fields: { ...record.fields, [key]: value } });
   const questionFor = (key) => (record.followUps || []).find((f) => f.field === key)?.question || null;
 
@@ -393,6 +496,24 @@ function Review({ record, settings, update, switchTemplate, onFinalise, onBack }
           <strong>{money(totals.total)}</strong>{settings.gst === "exclusive" ? " incl. GST" : ""}. Fix the line items
           or the spoken total — the document will only ever show the computed figure.
         </div>
+      )}
+
+      {missing.length > 0 && !guiding && (
+        <div className="gap-invite">
+          <div>
+            <strong>{missing.length} thing{missing.length > 1 ? "s" : ""} still missing.</strong> Want to fill {missing.length > 1 ? "them" : "it"} in by voice?
+          </div>
+          <button className="mini" onClick={() => setGuiding(true)}>Fill by voice</button>
+        </div>
+      )}
+
+      {guiding && (
+        <GapFiller
+          gaps={missing}
+          questionFor={questionFor}
+          onFill={(f, val) => setField(f.key, val)}
+          onDone={() => setGuiding(false)}
+        />
       )}
 
       <div className="fields">
