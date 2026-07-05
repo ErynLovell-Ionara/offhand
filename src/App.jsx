@@ -49,20 +49,26 @@ function repairJson(raw) {
 
 // ---------- speech errors ----------
 const MIC_ERRORS = {
-  "not-allowed": "Microphone permission is blocked for this site. Allow it in your browser's site settings, or type the note below.",
-  "service-not-allowed": "Microphone permission is blocked for this site. Allow it in your browser's site settings, or type the note below.",
-  "no-speech": "No speech detected. Try again closer to the mic, or type the note below.",
-  "audio-capture": "No microphone found on this device. Type the note below instead.",
-  "network": "This browser's speech service needs an internet connection. Type the note below instead.",
-  "aborted": null,
+  NotAllowedError: "Microphone permission is blocked for this site. Allow it in your browser's site settings (padlock or aA icon in the address bar), then reload.",
+  NotFoundError: "No microphone found on this device. Type the note below instead.",
+  NotReadableError: "The microphone is being used by another app. Close it and try again, or type below.",
+  SecurityError: "Microphone needs a secure (https) connection. Type the note below instead.",
 };
+
+const blobToBase64 = (blob) =>
+  new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1]);
+    r.onerror = () => reject(new Error("Couldn't read the recording"));
+    r.readAsDataURL(blob);
+  });
 
 const nowStamp = () => new Date().toISOString();
 const fmtDate = (iso) => new Date(iso).toLocaleString("en-NZ", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 const money = (n) => "$" + Number(n).toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function computeTotals(items, gst) {
-  const priced = (items || []).filter((li) => li && li.rate != null);
+  const priced = (items || []).filter((li) => li && li.rate != null && !Number.isNaN(Number(li.rate)) && !Number.isNaN(Number(li.quantity ?? 1)));
   const subtotal = priced.reduce((s, li) => s + (li.quantity ?? 1) * li.rate, 0);
   const gstAmt = gst === "exclusive" ? subtotal * 0.15 : 0;
   return { subtotal, gstAmt, total: subtotal + gstAmt, pricedCount: priced.length };
@@ -197,45 +203,67 @@ function Home({ records, templateId, setTemplateId, onStart, onOpen, onDeleteDra
 
 // ---------------- Capture ----------------
 function Capture({ template, onCancel, onExtracted }) {
-  const [supported] = useState(() => "webkitSpeechRecognition" in window || "SpeechRecognition" in window);
+  const [supported] = useState(() => !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder));
   const [listening, setListening] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [seconds, setSeconds] = useState(0);
   const [transcript, setTranscript] = useState("");
-  const [interim, setInterim] = useState("");
-  const [micError, setMicError] = useState(supported ? null : "This browser doesn't support voice capture. Type the note below — everything else works the same.");
+  const [micError, setMicError] = useState(supported ? null : "This browser doesn't support voice recording. Type the note below — everything else works the same.");
   const [busy, setBusy] = useState(false);
   const [apiError, setApiError] = useState(null);
   const recRef = useRef(null);
+  const chunksRef = useRef([]);
+  const timerRef = useRef(null);
 
-  const start = () => {
+  useEffect(() => () => { clearInterval(timerRef.current); recRef.current?.stream?.getTracks().forEach((t) => t.stop()); }, []);
+
+  const start = async () => {
     setMicError(null);
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SR();
-    rec.lang = "en-NZ";
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onresult = (e) => {
-      let fin = "", tmp = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) fin += t + " ";
-        else tmp += t;
-      }
-      if (fin) setTranscript((p) => (p + " " + fin).trim());
-      setInterim(tmp);
-    };
-    rec.onerror = (e) => {
-      const msg = MIC_ERRORS[e.error];
-      if (msg !== null) setMicError(msg || `Microphone error (${e.error}). Type the note below instead.`);
-      setListening(false);
-    };
-    rec.onend = () => { setListening(false); setInterim(""); };
-    recRef.current = rec;
-    try { rec.start(); setListening(true); } catch (err) {
-      setMicError("Couldn't start the microphone: " + err.message + ". Type the note below instead.");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        clearInterval(timerRef.current);
+        setListening(false);
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
+        if (blob.size < 1000) { setMicError("The recording was empty. Try again, or type below."); return; }
+        setTranscribing(true);
+        try {
+          const audio = await blobToBase64(blob);
+          const r = await fetch("/api/transcribe", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ audio, mimeType: blob.type }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || `Server error ${r.status}`);
+          if (data.warning) setMicError(data.warning + " Try again, or type below.");
+          if (data.transcript) setTranscript((p) => (p + " " + data.transcript).trim());
+        } catch (err) {
+          setMicError("Transcription failed: " + err.message);
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      recRef.current = rec;
+      rec.start();
+      setSeconds(0);
+      timerRef.current = setInterval(() => setSeconds((s) => {
+        if (s + 1 >= 180) { try { rec.stop(); } catch {} }
+        return s + 1;
+      }), 1000);
+      setListening(true);
+    } catch (err) {
+      setMicError(MIC_ERRORS[err.name] || `Couldn't start the microphone (${err.name || err.message}). Type the note below instead.`);
     }
   };
 
-  const stop = () => { recRef.current?.stop(); setListening(false); };
+  const stop = () => { if (recRef.current?.state === "recording") recRef.current.stop(); };
 
   const sortIt = async () => {
     setBusy(true);
@@ -286,10 +314,12 @@ function Capture({ template, onCancel, onExtracted }) {
 
       {supported && (
         <div className="mic-wrap">
-          <button className={"mic" + (listening ? " mic-live" : "")} onClick={listening ? stop : start}>
-            {listening ? "Stop" : "Speak"}
+          <button className={"mic" + (listening ? " mic-live" : "")} disabled={transcribing}
+            onClick={listening ? stop : start}>
+            {listening ? "Done" : transcribing ? "…" : "Speak"}
           </button>
-          {listening && <p className="mic-state">Listening…</p>}
+          {listening && <p className="mic-state">Recording {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")} — tap Done when finished</p>}
+          {transcribing && <p className="mic-state" style={{ color: "var(--green-deep)" }}>Writing it down…</p>}
         </div>
       )}
 
@@ -298,7 +328,7 @@ function Capture({ template, onCancel, onExtracted }) {
       <textarea
         className="transcript"
         placeholder="Your note appears here — or type it."
-        value={transcript + (interim ? " " + interim : "")}
+        value={transcript}
         onChange={(e) => setTranscript(e.target.value)}
         rows={7}
       />
@@ -316,9 +346,21 @@ function Capture({ template, onCancel, onExtracted }) {
 function Review({ record, settings, update, switchTemplate, onFinalise, onBack }) {
   const template = getTemplate(record.templateId);
   const setField = (key, value) => update({ fields: { ...record.fields, [key]: value } });
-  const clearFollowUp = (key) => update({ followUps: record.followUps.filter((f) => f.field !== key), fields: record.fields });
+  const questionFor = (key) => (record.followUps || []).find((f) => f.field === key)?.question || null;
 
-  const missing = template.fields.filter((f) => f.required && isEmpty(record.fields[f.key]));
+  const fieldMissing = (f) => {
+    const v = record.fields[f.key];
+    if (f.type === "lineitems") {
+      const items = (v || []).filter((li) => li && (li.description || "").trim());
+      if (items.length === 0) return true;
+      // Spec: a quote needs at least one line item with a rate, or a stated total.
+      if (record.templateId === "quote")
+        return !items.some((li) => li.rate != null && !Number.isNaN(Number(li.rate))) && isEmpty(record.fields.stated_total);
+      return false;
+    }
+    return isEmpty(v);
+  };
+  const missing = template.fields.filter((f) => f.required && fieldMissing(f));
   const totals = template.computedTotals ? computeTotals(record.fields.line_items, settings.gst) : null;
   const stated = template.computedTotals ? parseMoney(record.fields.stated_total) : null;
   const discrepancy = totals && stated != null && Math.abs(stated - totals.total) > 1 && Math.abs(stated - totals.subtotal) > 1;
@@ -345,15 +387,6 @@ function Review({ record, settings, update, switchTemplate, onFinalise, onBack }
         </div>
       )}
 
-      {(record.followUps || []).filter((f) => isEmpty(record.fields[f.field])).map((f) => (
-        <div className="gap" key={f.field}>
-          <label className="gap-q">{f.question}</label>
-          <input className="input" placeholder={template.fields.find((x) => x.key === f.field)?.label || f.field}
-            onBlur={(e) => { if (e.target.value.trim()) { setField(f.field, e.target.value.trim()); clearFollowUp(f.field); } }}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
-        </div>
-      ))}
-
       {discrepancy && (
         <div className="warn">
           You said the total was <strong>{money(stated)}</strong> but the line items compute to{" "}
@@ -364,7 +397,8 @@ function Review({ record, settings, update, switchTemplate, onFinalise, onBack }
 
       <div className="fields">
         {template.fields.map((f) => (
-          <FieldEditor key={f.key} field={f} value={record.fields[f.key]} onChange={(v) => setField(f.key, v)} required={f.required} />
+          <FieldEditor key={f.key} field={f} value={record.fields[f.key]} onChange={(v) => setField(f.key, v)}
+            required={f.required} question={isEmpty(record.fields[f.key]) ? questionFor(f.key) : null} />
         ))}
       </div>
 
@@ -387,13 +421,15 @@ function Review({ record, settings, update, switchTemplate, onFinalise, onBack }
 
 const isEmpty = (v) => v == null || v === "" || (Array.isArray(v) && v.length === 0);
 
-function FieldEditor({ field, value, onChange, required }) {
+function FieldEditor({ field, value, onChange, required, question }) {
   const missing = required && isEmpty(value);
+  const q = question ? <div className="gap-q">{question}</div> : null;
   if (field.type === "list") {
     const items = value || [];
     return (
       <div className={"field" + (missing ? " field-gap" : "")}>
         <label>{field.label}{required && " *"}</label>
+        {q}
         {items.map((it, i) => (
           <div className="list-row" key={i}>
             <input className="input" value={it}
@@ -410,6 +446,7 @@ function FieldEditor({ field, value, onChange, required }) {
     return (
       <div className={"field" + (missing ? " field-gap" : "")}>
         <label>{field.label}{required && " *"}</label>
+        {q}
         {items.map((li, i) => (
           <div className="li-row" key={i}>
             <input className="input li-desc" placeholder="Description" value={li.description || ""}
@@ -431,6 +468,7 @@ function FieldEditor({ field, value, onChange, required }) {
   return (
     <div className={"field" + (missing ? " field-gap" : "")}>
       <label>{field.label}{required && " *"}{field.hint && <span className="hint"> — {field.hint}</span>}</label>
+      {q}
       <Tag className="input" rows={field.type === "longtext" ? 3 : undefined}
         value={value ?? ""} placeholder={missing ? "Missing — tap to fill" : ""}
         onChange={(e) => onChange(e.target.value || null)} />
