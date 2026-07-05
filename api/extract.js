@@ -48,7 +48,7 @@ Output JSON shape:
 {
   "fields": { ${template.fields.map((f) => `"${f.key}": ...`).join(", ")} },
   "followUps": [{"field": "...", "question": "..."}],
-  "flags": {"notifiable": boolean (only if clearly indicated), "multi_job": boolean, "template_suggestion": string|null (another template id from [spray_record, job_sheet, quote, site_visit, incident, claim] ONLY if the transcript clearly matches it better, else null)}
+  "flags": {"notifiable": boolean (only if clearly indicated), "multi_job": boolean, "template_suggestion": string|null (another template id from [spray_record, job_sheet, quote, site_visit, incident, claim, animal_treatment, vet_consult] ONLY if the transcript clearly matches it better, else null)}
 }
 
 Fields for this template:
