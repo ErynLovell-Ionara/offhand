@@ -128,6 +128,55 @@ Parts and labour go in line_items with rates where stated; never compute totals.
     ],
     computedTotals: true,
   },
+  {
+    id: "animal_treatment",
+    name: "Animal treatment",
+    tagline: "Treatment record with withholding periods",
+    promptBlock: `This is an animal health treatment record for livestock (dairy/beef/sheep/deer).
+Animals may be identified by tag number ("four seven two" -> "472"), mob name, or count ("drenched the R2 heifers, about 140").
+Products carry batch numbers and doses where stated ("Mastalone one tube per quarter" / "ivermectin at one mil per ten kilos").
+Withholding periods (WHP) are critical compliance data: capture milk withholding and meat withholding exactly as stated
+("milk withhold 96 hours" -> milk_whp "96 hours"). NEVER infer or supply a withholding period that was not spoken —
+if the animals are food-producing and no WHP was stated, leave it null so it is flagged.
+Exception: if the speaker makes clear the stock are not lactating dairy animals ("they're beef", "dry stock", "the R2s"),
+set milk_whp to "Not applicable — non-lactating stock". Never do the same for meat_whp.
+Route means how it was given: intramammary, oral, subcutaneous, intramuscular, pour-on, in-water.`,
+    fields: [
+      { key: "client", label: "Client / farm", type: "text", required: true },
+      { key: "animals", label: "Animal(s) — tag, mob, or count", type: "text", required: true },
+      { key: "reason", label: "Reason / condition treated", type: "text", required: true },
+      { key: "products", label: "Products (with batch and dose)", type: "list", required: true },
+      { key: "route", label: "Route of administration", type: "text", required: false, hint: "Intramammary, oral, pour-on..." },
+      { key: "milk_whp", label: "Milk withholding period", type: "text", required: true },
+      { key: "meat_whp", label: "Meat withholding period", type: "text", required: true },
+      { key: "administered_by", label: "Administered by", type: "text", required: false },
+      { key: "vet_authorisation", label: "Vet authorisation / RVM reference", type: "text", required: false },
+      { key: "follow_up", label: "Follow-up or re-treatment due", type: "text", required: false },
+      { key: "notes", label: "Notes", type: "longtext", required: false },
+    ],
+  },
+  {
+    id: "vet_consult",
+    name: "Vet consult / farm visit",
+    tagline: "Clinical record — findings and opinion kept separate",
+    promptBlock: `This is a veterinary consult / farm visit record. It is a clinical document.
+Keep the owner's account (presenting complaint / history) separate from examination findings (what was directly observed).
+Diagnosis or assessment is professional opinion: put it only in diagnosis, clearly separate from findings.
+Never invent clinical values — temperatures, heart rates, scores must be traceable to the transcript.
+Medications dispensed carry product, quantity, dose instructions, and withholding periods where stated.`,
+    fields: [
+      { key: "client", label: "Client / farm", type: "text", required: true },
+      { key: "animals", label: "Animal(s) seen — tag, mob, or count", type: "text", required: true },
+      { key: "complaint", label: "Presenting complaint / history (owner's account)", type: "longtext", required: true, section: "Reported" },
+      { key: "findings", label: "Examination findings", type: "longtext", required: true, section: "Examination" },
+      { key: "diagnosis", label: "Diagnosis / assessment (professional opinion)", type: "longtext", required: false, section: "Assessment" },
+      { key: "treatment", label: "Treatment given", type: "longtext", required: false, section: "Assessment" },
+      { key: "dispensed", label: "Medications dispensed (product, dose, WHP)", type: "list", required: false, section: "Assessment" },
+      { key: "withholding", label: "Withholding periods advised", type: "text", required: false, section: "Assessment" },
+      { key: "follow_up", label: "Follow-up / recheck", type: "text", required: false, section: "Assessment" },
+      { key: "people_present", label: "People present", type: "list", required: false, section: "Assessment" },
+    ],
+  },
 ];
 
 export const getTemplate = (id) => TEMPLATES.find((t) => t.id === id);
