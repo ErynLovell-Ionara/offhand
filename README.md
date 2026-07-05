@@ -25,3 +25,4 @@ Put the key in `.env.local` as `ANTHROPIC_API_KEY=...` first.
 - Records: draft → finalise locks it; amending creates a new version. Nothing is overwritten.
 - This is the demo/companion web build. The full offline-first mobile app
   (Expo/Supabase/Deepgram per the kickoff prompt) is the separate Claude Code build.
+this is the one
