@@ -346,15 +346,16 @@ function Capture({ template, onCancel, onExtracted }) {
 // Guided voice gap-fill: reads each missing field's question aloud, records the
 // answer, transcribes it via the same Deepgram pipeline, fills it, moves on.
 function GapFiller({ gaps, questionFor, onFill, onDone }) {
+  const [frozen] = useState(() => gaps); // snapshot once; live `missing` shrinks as we fill
   const [i, setI] = useState(0);
-  const [phase, setPhase] = useState("idle"); // idle | asking | listening | working
+  const [phase, setPhase] = useState("idle"); // idle | asking | listening | working | confirm | done
   const [heard, setHeard] = useState("");
   const [err, setErr] = useState(null);
   const recRef = useRef(null);
   const chunksRef = useRef([]);
   const canTTS = typeof window !== "undefined" && "speechSynthesis" in window;
 
-  const field = gaps[i];
+  const field = frozen[i];
   const q = field ? (questionFor(field.key) || `What's the ${field.label.toLowerCase()}?`) : null;
 
   const speak = (text) => new Promise((res) => {
@@ -408,15 +409,19 @@ function GapFiller({ gaps, questionFor, onFill, onDone }) {
   };
 
   const stopListening = () => { if (recRef.current?.state === "recording") recRef.current.stop(); };
-  const next = () => { setHeard(""); setPhase("idle"); if (i + 1 < gaps.length) setI(i + 1); else onDone(); };
+  const next = () => {
+    setHeard(""); setErr(null);
+    if (i + 1 < frozen.length) { setPhase("idle"); setI(i + 1); }
+    else { setPhase("done"); setTimeout(() => onDone(), 0); } // let final field write commit first
+  };
 
   useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
 
-  if (!field) return null;
+  if (!field || phase === "done") return null;
 
   return (
     <div className="gapfill">
-      <div className="gapfill-progress mono">Gap {i + 1} of {gaps.length}</div>
+      <div className="gapfill-progress mono">Gap {i + 1} of {frozen.length}</div>
       <div className="gapfill-q">{q}</div>
 
       {phase === "idle" && (
@@ -433,7 +438,7 @@ function GapFiller({ gaps, questionFor, onFill, onDone }) {
         <div className="gapfill-confirm">
           <div className="gapfill-heard">“{heard}”</div>
           <div className="gapfill-actions">
-            <button className="mini" onClick={next}>{i + 1 < gaps.length ? "Next gap" : "Done"}</button>
+            <button className="mini" onClick={next}>{i + 1 < frozen.length ? "Next gap" : "Done"}</button>
             <button className="mini ghost" onClick={() => { onFill(field, null); askAndListen(); }}>Redo</button>
           </div>
         </div>
